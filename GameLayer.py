@@ -2,6 +2,7 @@ import cocos
 from cocos.euclid import *
 
 from GameObject import *
+from cocos.director import director
 
 # COLOR RGB
 RED = (227, 99, 135)
@@ -16,12 +17,14 @@ def center_position(v1, v2):
 class GameLayer(cocos.layer.Layer):
     is_event_handler = True
 
-    def __init__(self, grid_layer, line_layer):
+    def __init__(self, grid_layer, line_layer, stages, index):
         super(GameLayer, self).__init__()
         self.screen_size = cocos.director.director.get_window_size()
 
         self.grid_layer = grid_layer
         self.line_layer = line_layer
+        self.stages = stages
+        self.index = index
 
         self.matrix = []
         self.mirror_list = []
@@ -40,27 +43,6 @@ class GameLayer(cocos.layer.Layer):
         self.grid_size = 0
         self.grid_scale = 0
 
-        self.init_grid()
-
-        self.spawn_start_node((0, 0), 1, YELLOW)
-        self.spawn_start_node((1, 4), 1, RED)
-
-        self.spawn_end_node((2, 2), YELLOW)
-        self.spawn_end_node((0, 1), RED)
-
-        self.spawn_obs((1, 1))
-        self.spawn_obs((2, 1))
-        self.spawn_obs((3, 1))
-        self.spawn_obs((1, 2))
-        self.spawn_obs((3, 2))
-
-        self.spawn_mirror(RotatableMirror, (4, 3), 1, 100)
-        self.spawn_mirror(StaticMirror, (4, 0), 1, 100)
-
-        self.spawn_mirror(MovableMirror, (0, 2), 1, 100)
-        self.spawn_mirror(MovableMirror, (0, 3), -1, 100)
-        self.spawn_mirror(MovableMirror, (0, 4), 1, 100)
-
         self.schedule(self.update)
 
     # direction
@@ -74,9 +56,9 @@ class GameLayer(cocos.layer.Layer):
             e.color = (255, 255, 255)
 
         for s in self.start_node_list:
-            self.search_next(s.index, s.direction, s.color)
+            self.search_next(s.index, s.direction, s.color, s.strength)
 
-    def search_next(self, origin_index, direction, color):
+    def search_next(self, origin_index, direction, color, strength):
         next_index = (-1, -1)
         if direction == 0:
             next_index = (origin_index[0], origin_index[1] + 1)
@@ -89,18 +71,22 @@ class GameLayer(cocos.layer.Layer):
 
         if 0 <= next_index[0] < self.grid_count[0] and 0 <= next_index[1] < self.grid_count[1]:
             next_grid = self.matrix[next_index[0]][next_index[1]]
-            self.spawn_line(origin_index, next_index, color)
+            line = self.spawn_line(origin_index, next_index, color, strength)
 
             if next_grid.item_ins is not None:
                 if isinstance(next_grid.item_ins, Mirror):
-                    self.search_next(next_index, next_grid.item_ins.reflect(direction), color)
+                    origin_strength = strength
+                    strength = strength * (next_grid.item_ins.reflect_percent / 100)
+                    self.search_next(next_index, next_grid.item_ins.reflect(direction), color, strength)
+                    if next_grid.item_ins.reflect_percent < 100:
+                        self.search_next(next_index, direction, color, origin_strength - strength)
                 elif isinstance(next_grid.item_ins, EndNode):
                     if next_grid.item_ins.direction == -1 or abs(direction - next_grid.item_ins.direction) == 2:
                         if tuple(next_grid.item_ins.activated_color) == tuple(color):
-                            next_grid.item_ins.activated()
+                            next_grid.item_ins.add_strength(strength)
                     return
             else:
-                self.search_next(next_index, direction, color)
+                self.search_next(next_index, direction, color, strength)
         else:
             origin_pos = self.matrix[origin_index[0]][origin_index[1]].position
             next_pos = (-1, -1)
@@ -114,7 +100,7 @@ class GameLayer(cocos.layer.Layer):
             elif direction == 3:
                 next_pos = (origin_pos[0] - adder, origin_pos[1])
 
-            self.spawn_line_pos(origin_pos, next_pos, color)
+            self.spawn_line_pos(origin_pos, next_pos, color, strength)
             return
 
     def init_grid(self):
@@ -136,34 +122,22 @@ class GameLayer(cocos.layer.Layer):
                 t_list.append(grid)
             self.matrix.append(t_list)
 
-    def spawn_line(self, from_index, to_index, color):
-        rotation = 0
-        if from_index[1] != to_index[1]:
-            rotation = 90
+    def spawn_line(self, from_index, to_index, color, strength):
+        from_pos = self.matrix[from_index[0]][from_index[1]].position
+        to_pos = self.matrix[to_index[0]][to_index[1]].position
 
-        l = cocos.sprite.Sprite(image='img/Line.png',
-                                position=center_position(self.matrix[from_index[0]][from_index[1]].position,
-                                                         self.matrix[to_index[0]][to_index[1]].position),
-                                scale=self.grid_scale / 1,
-                                color=color,
-                                rotation=rotation)
-
+        l = Line(from_pos, to_pos, color, strength, self, from_index, to_index)
         self.line_list.append(l)
         self.line_layer.add(l)
 
-    def spawn_line_pos(self, from_pos, to_pos, color):
-        rotation = 0
-        if from_pos[1] != to_pos[1]:
-            rotation = 90
+        return l
 
-        l = cocos.sprite.Sprite(image='img/Line.png',
-                                position=center_position(from_pos, to_pos),
-                                scale=self.grid_scale / 1,
-                                color=color,
-                                rotation=rotation)
-
+    def spawn_line_pos(self, from_pos, to_pos, color, strength):
+        l = Line(from_pos, to_pos, color, strength, self)
         self.line_list.append(l)
         self.line_layer.add(l)
+
+        return l
 
     def spawn_obs(self, index):
         o = Obstacle(self.matrix[index[0]][index[1]].position, self.grid_scale, index)
@@ -172,22 +146,24 @@ class GameLayer(cocos.layer.Layer):
         self.add(o)
 
     def spawn_mirror(self, c, index, direction, reflect):
-        m = c(self.matrix[index[0]][index[1]].position, self.grid_scale / 1.3, index, direction, reflect)
+        m = c(self.matrix[index[0]][index[1]].position, self.grid_scale / 1.3, index, direction, reflect, self)
         self.matrix[index[0]][index[1]].item_ins = m
         self.mirror_list.append(m)
         self.add(m)
 
-    def spawn_start_node(self, index, direction, color):
-        s = StartNode(self.matrix[index[0]][index[1]].position, self.grid_scale / 1.3, index, direction, color)
+    def spawn_start_node(self, index, direction, color, strength):
+        s = StartNode(self.matrix[index[0]][index[1]].position, self.grid_scale / 1.3, index, direction, color, strength, self)
         self.matrix[index[0]][index[1]].item_ins = s
         self.start_node_list.append(s)
         self.add(s)
 
-    def spawn_end_node(self, index, color, direction=-1):
-        e = EndNode(self.matrix[index[0]][index[1]].position, self.grid_scale / 1.3, index, color, direction)
+    def spawn_end_node(self, index, color, goal_strength, direction=-1):
+        e = EndNode(self.matrix[index[0]][index[1]].position, self.grid_scale / 1.3,
+                    index, color, goal_strength, self, direction)
         self.matrix[index[0]][index[1]].item_ins = e
         self.end_node_list.append(e)
         self.add(e)
+        e.draw_indi()
 
     def get_grid(self, position):
         for x_i in range(self.grid_count[0]):
@@ -219,6 +195,24 @@ class GameLayer(cocos.layer.Layer):
 
                 self.checking_grid = grid
 
+    def update_endnode(self):
+        for e in self.end_node_list:
+            e.check_connection()
+
+    def update_mirror(self):
+        for m in self.mirror_list:
+            m.draw_indi()
+
     def update(self, dt):
         self.update_line()
-        return
+        self.update_endnode()
+        self.update_mirror()
+
+        clear = True
+        for e in self.end_node_list:
+            if e.isActivated is not True:
+                clear = False
+
+        if clear:
+            if self.index + 1 <= 3:
+                director.push(self.stages[self.index + 1])
